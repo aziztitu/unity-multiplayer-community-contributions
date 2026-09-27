@@ -29,10 +29,10 @@ In Unity Package Manager, add a package from Git URL:
 https://github.com/Unity-Technologies/multiplayer-community-contributions.git?path=/Transports/com.community.netcode.transport.webrtc
 ```
 
-**NOTE:** Until this contribution is merged, you can use this fork URL instead:
+**NOTE:** Until **1.0.1** (Android IL2CPP fix) is merged, use this fork URL instead:
 
 ```
-https://github.com/aziztitu/unity-multiplayer-community-contributions.git?path=/Transports/com.community.netcode.transport.webrtc#transport/webrtc
+https://github.com/aziztitu/unity-multiplayer-community-contributions.git?path=/Transports/com.community.netcode.transport.webrtc#fix/android-il2cpp-stripping
 ```
 
 After installing, add `WebRTCTransport` component on the same GameObject as `NetworkManager`.
