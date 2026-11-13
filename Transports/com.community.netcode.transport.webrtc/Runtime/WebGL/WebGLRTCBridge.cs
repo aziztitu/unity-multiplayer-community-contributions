@@ -48,7 +48,7 @@ namespace Netcode.Transports.WebRTC
         public static extern bool WebRTC_IsDataChannelOpen(int clientId);
 
         [DllImport("__Internal")]
-        public static extern void WebRTC_Send(int clientId, IntPtr bytesPtr, int length);
+        public static extern void WebRTC_Send(int clientId, IntPtr bytesPtr, int length, int channel);
 
         [DllImport("__Internal")]
         public static extern void WebRTC_SetRemoteDescriptionAsync(int clientId, string json, string callId);
@@ -97,8 +97,7 @@ namespace Netcode.Transports.WebRTC
         [MonoPInvokeCallback(typeof(PeerDataCallback))]
         public static void HandleIncomingPeerData(int clientId, IntPtr dataPtr, int length)
         {
-            Debug.Log($"HandleIncomingPeerData ${clientId}: " + length);
-
+            // Runs for every packet received: no logging here.
             if (s_Transport == null)
             {
                 Debug.LogWarning($"Received peer data for client {clientId}, but no WebRTCTransport is bound");
@@ -120,8 +119,7 @@ namespace Netcode.Transports.WebRTC
 
         public void OnJSAsyncResult(string json)
         {
-            Debug.Log("OnJSAsyncResult: " + json);
-
+            // Not logged: round-trip time polling completes through here about once a second per peer.
             var payload = JsonUtility.FromJson<CallbackPayload>(json);
             if (pendingCalls.TryGetValue(payload.callId, out var tcs))
             {

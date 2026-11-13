@@ -58,15 +58,15 @@ mergeInto(LibraryManager.library, {
     WebRTCBridge.createNewPeer(JSON.parse(iceServersJson), clientId);
   },
 
+  // The two functions below run for every packet sent, so they do not log.
   WebRTC_IsDataChannelOpen: function (clientId) {
-    console.log('WebRTC_IsDataChannelOpen', clientId);
     return WebRTCBridge.isDataChannelOpen(clientId);
   },
 
-  WebRTC_Send: function (clientId, dataPtr, length) {
-    console.log('WebRTC_Send', clientId, length);
+  // channel: 0 = reliable, 1 = unreliable, 2 = unreliable sequenced (RTCDeliveryChannel in C#)
+  WebRTC_Send: function (clientId, dataPtr, length, channel) {
     const bytes = new Uint8Array(Module.HEAPU8.buffer, dataPtr, length);
-    return WebRTCBridge.send(clientId, bytes);
+    return WebRTCBridge.send(clientId, bytes, channel);
   },
 
   WebRTC_SetRemoteDescriptionAsync: function (clientId, jsonPtr, callIdPtr) {
@@ -104,9 +104,9 @@ mergeInto(LibraryManager.library, {
     WebRTCBridge.close(clientId);
   },
 
+  // Polled about once a second per peer, so it does not log.
   WebRTC_GetRTTAsync: function (clientId, callIdPtr) {
     const callId = UTF8ToString(callIdPtr);
-    console.log('WebRTC_GetRTTAsync', clientId, callId);
     WebRTCBridge.getRTTAsync(clientId, callId);
   }
 });

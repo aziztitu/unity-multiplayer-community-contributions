@@ -15,7 +15,8 @@ namespace Netcode.Transports.WebRTC
     public class UnityRTCPeerConnection : BaseCustomRTCPeerConnection
     {
         private NativePeerConnection peer;
-        private RTCDataChannel dataChannel;
+        // indexed by RTCDeliveryChannel
+        private readonly RTCDataChannel[] dataChannels = new RTCDataChannel[RTCDeliveryChannels.Count];
 
         public UnityRTCPeerConnection(MonoBehaviour context, RTCIceServer[] iceServers, ulong clientId)
             : base(context, iceServers, clientId)
@@ -43,40 +44,69 @@ namespace Netcode.Transports.WebRTC
         {
             if (IsHost)
             {
-                dataChannel = peer.CreateDataChannel("game");
-                SetupDataChannelEvents();
+                // The host side creates every channel; the client receives them through OnDataChannel.
+                dataChannels[(int)RTCDeliveryChannel.Reliable] =
+                    peer.CreateDataChannel(RTCDeliveryChannels.Labels[(int)RTCDeliveryChannel.Reliable]);
+
+                // No retransmits: a lost packet is simply gone, and nothing queues up behind it.
+                dataChannels[(int)RTCDeliveryChannel.Unreliable] = peer.CreateDataChannel(
+                    RTCDeliveryChannels.Labels[(int)RTCDeliveryChannel.Unreliable],
+                    new RTCDataChannelInit { ordered = false, maxRetransmits = 0 });
+
+                // Ordered with no retransmits: late packets are dropped rather than delivered out of order.
+                dataChannels[(int)RTCDeliveryChannel.UnreliableSequenced] = peer.CreateDataChannel(
+                    RTCDeliveryChannels.Labels[(int)RTCDeliveryChannel.UnreliableSequenced],
+                    new RTCDataChannelInit { ordered = true, maxRetransmits = 0 });
+
+                for (int i = 0; i < dataChannels.Length; i++)
+                {
+                    SetupDataChannelEvents(i);
+                }
             }
             else
             {
                 peer.OnDataChannel = channel =>
                 {
-                    Debug.Log($"[WebRTCTransport] OnDataChannel available: {channel.Id}, {channel.Negotiated}, {channel.ReadyState}");
+                    int index = RTCDeliveryChannels.IndexOfLabel(channel.Label);
+                    Debug.Log($"[WebRTCTransport] OnDataChannel available: {channel.Label}, {channel.Id}, {channel.Negotiated}, {channel.ReadyState}");
+                    if (index < 0)
+                    {
+                        Debug.LogWarning($"[WebRTCTransport] Ignoring unknown data channel: {channel.Label}");
+                        return;
+                    }
 
-                    dataChannel = channel;
-                    if (dataChannel.ReadyState == NativeDataChannelState.Open)
+                    dataChannels[index] = channel;
+                    if (index == (int)RTCDeliveryChannel.Reliable && channel.ReadyState == NativeDataChannelState.Open)
                     {
                         Debug.Log("[WebRTCTransport] Client DataChannel is already open");
                         TriggerOnDataChannelOpen();
                     }
 
-                    SetupDataChannelEvents();
+                    SetupDataChannelEvents(index);
                 };
             }
         }
 
-        private void SetupDataChannelEvents()
+        private void SetupDataChannelEvents(int index)
         {
-            dataChannel.OnOpen += () =>
-            {
-                TriggerOnDataChannelOpen();
-            };
+            var channel = dataChannels[index];
 
-            dataChannel.OnMessage = bytes =>
+            // The connection is established when the reliable channel opens. The unreliable
+            // channels may open slightly later; until then Send falls back to the reliable one.
+            if (index == (int)RTCDeliveryChannel.Reliable)
+            {
+                channel.OnOpen += () =>
+                {
+                    TriggerOnDataChannelOpen();
+                };
+            }
+
+            channel.OnMessage = bytes =>
             {
                 TriggerOnDataChannelMessage(bytes);
             };
 
-            dataChannel.OnError = error =>
+            channel.OnError = error =>
             {
                 TriggerOnDataChannelError(new RTCError
                 {
@@ -86,19 +116,25 @@ namespace Netcode.Transports.WebRTC
             };
         }
 
-        public override bool IsDataChannelOpen()
+        private static bool IsOpen(RTCDataChannel channel)
         {
-            if (dataChannel == null)
-            {
-                return false;
-            }
-
-            return dataChannel.ReadyState == NativeDataChannelState.Open;
+            return channel != null && channel.ReadyState == NativeDataChannelState.Open;
         }
 
-        public override void Send(byte[] data)
+        public override bool IsDataChannelOpen()
         {
-            dataChannel.Send(data);
+            return IsOpen(dataChannels[(int)RTCDeliveryChannel.Reliable]);
+        }
+
+        public override void Send(byte[] data, RTCDeliveryChannel deliveryChannel)
+        {
+            var channel = dataChannels[(int)deliveryChannel];
+            if (!IsOpen(channel))
+            {
+                channel = dataChannels[(int)RTCDeliveryChannel.Reliable];
+            }
+
+            channel.Send(data);
         }
 
         public override async Task SetRemoteDescription(RTCSessionDescription description)
@@ -154,25 +190,56 @@ namespace Netcode.Transports.WebRTC
         public override void Close()
         {
             peer?.Close();
-            dataChannel?.Close();
+            foreach (var channel in dataChannels)
+            {
+                channel?.Close();
+            }
         }
 
         public override async Task<double> GetRTT()
         {
             var statsReport = await peer.GetStatsAsync(ctx);
-            foreach (var stat in statsReport.Stats.Values)
+            if (statsReport == null)
             {
-                if (stat.Type == RTCStatsType.CandidatePair)
+                return 0;
+            }
+
+            try
+            {
+                // Several candidate pairs can exist; the nominated one is the path actually in use.
+                double fallback = 0;
+                foreach (var stat in statsReport.Stats.Values)
                 {
+                    if (stat.Type != RTCStatsType.CandidatePair)
+                    {
+                        continue;
+                    }
+
                     var candidatePair = stat as RTCIceCandidatePairStats;
-                    if (candidatePair != null)
+                    if (candidatePair == null)
+                    {
+                        continue;
+                    }
+
+                    // Trust the nominated pair even when it reports 0: WebRTC measures in whole
+                    // milliseconds, so a LAN or same-machine connection really does read as 0.
+                    if (candidatePair.nominated)
                     {
                         return candidatePair.currentRoundTripTime;
                     }
-                }
-            }
 
-            return 0;
+                    if (candidatePair.currentRoundTripTime > 0)
+                    {
+                        fallback = candidatePair.currentRoundTripTime;
+                    }
+                }
+
+                return fallback;
+            }
+            finally
+            {
+                statsReport.Dispose();
+            }
         }
 
         private RTCConfiguration CreateRtcConfiguration(RTCIceServer[] iceServers)

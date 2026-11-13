@@ -76,6 +76,20 @@ For production, I recommend that you run your own signaling server. The open-sou
 
 > Tip: During local testing, you can pre-fill the `roomId` to a custom value in the inspector, and all local instances will host/join the same room automatically. This will help with iterating quickly.
 
+### Delivery modes
+
+The transport opens three WebRTC data channels per connection and picks one from the `NetworkDelivery` Netcode asks for:
+
+| Netcode delivery | Data channel | Behaviour |
+|---|---|---|
+| `Reliable`, `ReliableSequenced`, `ReliableFragmentedSequenced` | `game` | Ordered, retransmitted until delivered |
+| `Unreliable` | `game-unreliable` | Sent once; may be lost or reordered |
+| `UnreliableSequenced` | `game-unreliable-sequenced` | Sent once; may be lost, never delivered out of order |
+
+Frequent state updates (for example `NetworkTransform` with unreliable deltas, or custom unreliable RPCs and messages) therefore do not stall behind a lost packet. Untick **Use Unreliable Channels** on the transport to send everything on the reliable channel. Both ends of a connection must use the same package version.
+
+`GetCurrentRtt` returns the round-trip time measured from WebRTC's statistics, refreshed every **Rtt Poll Interval** seconds.
+
 ### STUN / TURN
 
 **Built-in STUN servers**
