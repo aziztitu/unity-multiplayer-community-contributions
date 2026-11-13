@@ -1,3 +1,22 @@
+/** Mirrors RTCDeliveryChannel in C#. The values index DELIVERY_CHANNEL_LABELS / DELIVERY_CHANNEL_OPTIONS. */
+export enum DeliveryChannel {
+  /** Ordered and retransmitted until delivered. */
+  Reliable = 0,
+  /** Sent once; may be lost or arrive out of order. */
+  Unreliable = 1,
+  /** Sent once; may be lost, but never delivered out of order. */
+  UnreliableSequenced = 2,
+}
+
+/** Data channel labels, indexed by DeliveryChannel. Must match RTCDeliveryChannels.Labels in C#. */
+export const DELIVERY_CHANNEL_LABELS = ['game', 'game-unreliable', 'game-unreliable-sequenced'];
+
+export const DELIVERY_CHANNEL_OPTIONS: (RTCDataChannelInit | undefined)[] = [
+  undefined,
+  { ordered: false, maxRetransmits: 0 },
+  { ordered: true, maxRetransmits: 0 },
+];
+
 export type UnityIceServer = {
   username: string;
   credential: string;

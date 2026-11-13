@@ -1,6 +1,7 @@
 import { SignalClient } from './signal-client';
 import { WebGLRtcPeerConnection } from './webgl-rtc-peer-connection';
 import {
+  DeliveryChannel,
   UnityRTCIceConnectionState,
   WebRTCBridgeTypeConversions,
   type UnityIceServer,
@@ -69,18 +70,15 @@ export class WebRTCBridge {
     this.peers[clientId] = peer;
   }
 
+  // isDataChannelOpen and send run for every packet sent: no logging here.
   public isDataChannelOpen(clientId: number): boolean {
     const peer = this.getPeer(clientId);
-    const isOpen = peer.isDataChannelOpen();
-    console.log('Is Data Channel Open: ', clientId, isOpen);
-    return isOpen;
+    return peer.isDataChannelOpen();
   }
 
-  public send(clientId: number, bytes: Uint8Array): void {
-    console.log('Sending:', clientId, bytes.length);
-
+  public send(clientId: number, bytes: Uint8Array, channel: DeliveryChannel = DeliveryChannel.Reliable): void {
     const peer = this.getPeer(clientId);
-    peer.send(bytes);
+    peer.send(bytes, channel);
   }
 
   public async setRemoteDescriptionAsync(
@@ -187,8 +185,8 @@ export class WebRTCBridge {
       return;
     }
 
+    // Runs for every packet received: no logging here.
     const UnityModule = (window as any).UnityModule;
-    console.log(UnityModule);
 
     // Allocating memory manually since ALLOC_STACK didn't work
     const ptr = (window as any)._malloc(bytes.length);

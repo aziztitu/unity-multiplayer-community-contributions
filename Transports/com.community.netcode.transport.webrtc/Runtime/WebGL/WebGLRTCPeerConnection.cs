@@ -29,13 +29,14 @@ namespace Netcode.Transports.WebRTC
             return WebGLRTCBridge.WebRTC_IsDataChannelOpen((int)ClientId);
         }
 
-        public override void Send(byte[] data)
+        public override void Send(byte[] data, RTCDeliveryChannel deliveryChannel)
         {
             GCHandle handle = GCHandle.Alloc(data, GCHandleType.Pinned);
             try
             {
                 IntPtr ptr = handle.AddrOfPinnedObject();
-                WebGLRTCBridge.WebRTC_Send((int)ClientId, ptr, data.Length);
+                // the browser side falls back to the reliable channel if this one is not open yet
+                WebGLRTCBridge.WebRTC_Send((int)ClientId, ptr, data.Length, (int)deliveryChannel);
             }
             finally
             {

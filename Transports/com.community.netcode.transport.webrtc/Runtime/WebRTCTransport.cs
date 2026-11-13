@@ -26,6 +26,13 @@ namespace Netcode.Transports.WebRTC
         [Header("Rooms")]
         public string roomId = "";
 
+        [Header("Delivery")]
+        [Tooltip("Send Netcode's unreliable deliveries on unreliable WebRTC data channels, so a lost packet never delays the ones behind it. Turn off to send everything on the single reliable, ordered channel.")]
+        public bool useUnreliableChannels = true;
+
+        [Tooltip("How often, in seconds, the round-trip time to each peer is measured.")]
+        public float rttPollInterval = 1f;
+
         public BaseCustomRTCSignalClient signalClient { get; private set; }
 
         private Dictionary<ulong, BaseCustomRTCPeerConnection> peers = new();
@@ -45,6 +52,11 @@ namespace Netcode.Transports.WebRTC
         private bool connected;
 
         private byte[] sendBuffer = new byte[1500];
+
+        // last measured round-trip time per client, in milliseconds
+        private readonly Dictionary<ulong, ulong> rttMs = new();
+        private readonly List<ulong> rttPollScratch = new();
+        private float nextRttPollTime;
 
         public override ulong ServerClientId => 0;
 
@@ -68,6 +80,54 @@ namespace Netcode.Transports.WebRTC
         protected override void OnEarlyUpdate()
         {
             MainThreadDispatcher.Dispatch();
+            PollRtt();
+        }
+
+        // Reading the round-trip time from WebRTC is asynchronous, but Netcode asks for it
+        // synchronously (it feeds the server time sync). So measure on a timer and cache it.
+        private void PollRtt()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (now < nextRttPollTime)
+            {
+                return;
+            }
+
+            nextRttPollTime = now + Mathf.Max(0.1f, rttPollInterval);
+
+            if (clientPeer != null && clientPeer.IsDataChannelOpen())
+            {
+                _ = UpdateRtt(ServerClientId, clientPeer);
+            }
+
+            rttPollScratch.Clear();
+            rttPollScratch.AddRange(peers.Keys);
+            foreach (var clientId in rttPollScratch)
+            {
+                if (peers.TryGetValue(clientId, out var peer) && peer.IsDataChannelOpen())
+                {
+                    _ = UpdateRtt(clientId, peer);
+                }
+            }
+        }
+
+        private async Task UpdateRtt(ulong clientId, BaseCustomRTCPeerConnection peer)
+        {
+            try
+            {
+                double seconds = await peer.GetRTT();
+
+                // the peer may have gone away while the measurement was in flight
+                bool stillCurrent = clientId == ServerClientId ? clientPeer == peer : peers.TryGetValue(clientId, out var current) && current == peer;
+                if (seconds >= 0 && stillCurrent)
+                {
+                    rttMs[clientId] = (ulong)Math.Round(seconds * 1000.0);
+                }
+            }
+            catch (Exception)
+            {
+                // stats are best effort; keep the last known value
+            }
         }
 
         public override void Shutdown()
@@ -86,6 +146,7 @@ namespace Netcode.Transports.WebRTC
             socketIdToClientId.Clear();
             iceCandidateQueues.Clear();
             remoteDescriptionSet.Clear();
+            rttMs.Clear();
 
             connected = false;
         }
@@ -160,16 +221,38 @@ namespace Netcode.Transports.WebRTC
                 return;
             }
 
+            var channel = GetDeliveryChannel(delivery);
+
             if (data.Count <= sendBuffer.Length)
             {
                 Buffer.BlockCopy(data.Array, data.Offset, sendBuffer, 0, data.Count);
-                targetPeer.Send(new ArraySegment<byte>(sendBuffer, 0, data.Count).ToArray());
+                targetPeer.Send(new ArraySegment<byte>(sendBuffer, 0, data.Count).ToArray(), channel);
             }
             else
             {
                 var temp = new byte[data.Count];
                 Buffer.BlockCopy(data.Array, data.Offset, temp, 0, data.Count);
-                targetPeer.Send(temp);
+                targetPeer.Send(temp, channel);
+            }
+        }
+
+        private RTCDeliveryChannel GetDeliveryChannel(NetworkDelivery delivery)
+        {
+            if (!useUnreliableChannels)
+            {
+                return RTCDeliveryChannel.Reliable;
+            }
+
+            switch (delivery)
+            {
+                case NetworkDelivery.Unreliable:
+                    return RTCDeliveryChannel.Unreliable;
+                case NetworkDelivery.UnreliableSequenced:
+                    return RTCDeliveryChannel.UnreliableSequenced;
+                default:
+                    // Reliable, ReliableSequenced and ReliableFragmentedSequenced: a WebRTC reliable
+                    // channel is ordered and handles large messages itself.
+                    return RTCDeliveryChannel.Reliable;
             }
         }
 
@@ -184,6 +267,7 @@ namespace Netcode.Transports.WebRTC
 
             iceCandidateQueues.Remove(clientId);
             remoteDescriptionSet.Remove(clientId);
+            rttMs.Remove(clientId);
         }
 
         public override void DisconnectLocalClient()
@@ -192,7 +276,14 @@ namespace Netcode.Transports.WebRTC
             Shutdown();
         }
 
-        public override ulong GetCurrentRtt(ulong clientId) => 0;
+        /// <summary>
+        /// Last measured round-trip time to the client in milliseconds (0 until the first measurement,
+        /// about <see cref="rttPollInterval"/> seconds after connecting).
+        /// </summary>
+        public override ulong GetCurrentRtt(ulong clientId)
+        {
+            return rttMs.TryGetValue(clientId, out var rtt) ? rtt : 0;
+        }
 
         public override NetworkEvent PollEvent(
             out ulong clientId,
@@ -251,7 +342,12 @@ namespace Netcode.Transports.WebRTC
                 string from = payload.GetProperty("from").GetString();
                 string sdp = payload.GetProperty("sdp").GetString();
 
-                ulong clientId = socketIdToClientId[from];
+                if (!socketIdToClientId.TryGetValue(from, out ulong clientId))
+                {
+                    Debug.LogWarning($"[WebRTCTransport] Ignoring answer from unknown socket {from}");
+                    return;
+                }
+
                 Debug.Log($"[WebRTCTransport] Answer received from client {clientId}: {sdp}");
 
                 if (peers.TryGetValue(clientId, out var peer))
@@ -268,7 +364,12 @@ namespace Netcode.Transports.WebRTC
                 string from = payload.GetProperty("from").GetString();
                 var candidateData = payload.GetProperty("candidate");
 
-                ulong clientId = socketIdToClientId[from];
+                if (!socketIdToClientId.TryGetValue(from, out ulong clientId))
+                {
+                    Debug.LogWarning($"[WebRTCTransport] Ignoring ICE candidate from unknown socket {from}");
+                    return;
+                }
+
                 HandleRemoteIceCandidate(clientId, candidateData.ParseIceCandidateInit());
             });
 
@@ -276,7 +377,12 @@ namespace Netcode.Transports.WebRTC
             {
                 string socketId = payload.GetProperty("socketId").GetString();
 
-                ulong clientId = socketIdToClientId[socketId];
+                // a socket that left before it was assigned a client id has nothing to clean up
+                if (!socketIdToClientId.TryGetValue(socketId, out ulong clientId))
+                {
+                    return;
+                }
+
                 Debug.LogWarning($"[WebRTCTransport] Client {clientId} disconnected via socket event.");
 
                 if (peers.ContainsKey(clientId))
@@ -288,6 +394,7 @@ namespace Netcode.Transports.WebRTC
 
                 peers.Remove(clientId);
                 socketIdToClientId.Remove(socketId);
+                rttMs.Remove(clientId);
             });
 
             await signalClient.Emit("host-room", new { roomId = roomId });
